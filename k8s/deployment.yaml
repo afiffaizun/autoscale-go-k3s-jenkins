@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: go-app
-          image: mafifdev/autoscale-go-k3s:2
+          image: mafifdev/autoscale-go-k3s:latest
           imagePullPolicy: Always
           ports:
             - containerPort: 8080
