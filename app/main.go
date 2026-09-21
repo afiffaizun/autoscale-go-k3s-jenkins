@@ -8,7 +8,7 @@ import (
 )
 
 func homeHandler(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprintln(w, "Hello from Go CI/CD!")
+	fmt.Fprintln(w, "Hello from Go CI/CD v2")
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
