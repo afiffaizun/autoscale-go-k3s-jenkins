@@ -33,10 +33,22 @@ pipeline {
 
         stage('Docker Push') {
             steps {
-                sh '''
-                    docker push ${IMAGE}:${BUILD_NUMBER}
-                    docker push ${IMAGE}:latest
-                '''
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'dockerhub',
+                        usernameVariable: 'DOCKER_USERNAME',
+                        passwordVariable: 'DOCKER_PASSWORD'
+                    )
+                ]) {
+                    sh '''
+                        echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
+
+                        docker push ${IMAGE}:${BUILD_NUMBER}
+                        docker push ${IMAGE}:latest
+
+                        docker logout
+                    '''
+                }
             }
         }
 
