@@ -52,20 +52,6 @@ pipeline {
             }
         }
 
-        stage('Deploy to K3s') {
-            steps {
-                sh '''
-                    kubectl apply -f k8s/deployment.yaml
-                    kubectl apply -f k8s/service.yaml
-                    kubectl apply -f k8s/keda.yaml
-
-                    kubectl set image deployment/${DEPLOYMENT} \
-                      go-app=${IMAGE}:${BUILD_NUMBER} \
-                      -n ${NAMESPACE}
-                '''
-            }
-        }
-
         stage('Rollout Status') {
             steps {
                 sh '''
