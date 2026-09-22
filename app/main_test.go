@@ -12,7 +12,7 @@ func TestHomeHandler(t *testing.T) {
 
 	homeHandler(rec, req)
 
-	expected := "Hello from Go CI/CD!\n"
+	expected := "Hello from Go CI/CD v2\n"
 
 	if rec.Body.String() != expected {
 		t.Errorf("expected %q, got %q", expected, rec.Body.String())
