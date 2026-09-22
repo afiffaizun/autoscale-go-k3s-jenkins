@@ -2,36 +2,30 @@ pipeline {
     agent any
 
     environment {
-        IMAGE = "mafifdev/autoscale-go-k3s"
-        NAMESPACE = "go-cicd"
+        IMAGE_REPO = "mafifdev/autoscale-go-k3s"
+        NAMESPACE  = "go-cicd"
         DEPLOYMENT = "go-app"
+        CONTAINER  = "go-app"
+    }
+
+    options {
+        disableConcurrentBuilds()
+        timeout(time: 30, unit: 'MINUTES')
+    }
+
+    parameters {
+        string(name: 'APP_URL', defaultValue: 'http://192.168.123.240:31048/health',
+               description: 'Health check URL setelah deploy')
     }
 
     stages {
-
-        stage('Checkout') {
-            steps {
-                checkout scm
-            }
-        }
-
         stage('Go Test') {
             steps {
                 sh 'go test ./...'
             }
         }
 
-        stage('Docker Build') {
-            steps {
-                sh '''
-                    docker build \
-                      -t ${IMAGE}:${BUILD_NUMBER} \
-                      -t ${IMAGE}:latest .
-                '''
-            }
-        }
-
-        stage('Docker Push') {
+        stage('Build & Push Image') {
             steps {
                 withCredentials([
                     usernamePassword(
@@ -41,11 +35,11 @@ pipeline {
                     )
                 ]) {
                     sh '''
+                        IMAGE="${IMAGE_REPO}:${BUILD_NUMBER}"
                         echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
-
-                        docker push ${IMAGE}:${BUILD_NUMBER}
-                        docker push ${IMAGE}:latest
-
+                        docker build -t "${IMAGE}" -t "${IMAGE_REPO}:latest" .
+                        docker push "${IMAGE}"
+                        docker push "${IMAGE_REPO}:latest"
                         docker logout
                     '''
                 }
@@ -57,31 +51,27 @@ pipeline {
                 sh '''
                     kubectl apply -f k8s/service.yaml
                     kubectl apply -f k8s/keda.yaml
-
                     kubectl set image deployment/${DEPLOYMENT} \
-                      go-app=${IMAGE}:${BUILD_NUMBER} \
-                      -n ${NAMESPACE}
-                '''
-            }
-        }
-
-        stage('Rollout Status') {
-            steps {
-                sh '''
+                        ${CONTAINER}=${IMAGE_REPO}:${BUILD_NUMBER} -n ${NAMESPACE}
                     kubectl rollout status deployment/${DEPLOYMENT} \
-                      -n ${NAMESPACE} \
-                      --timeout=120s
+                        -n ${NAMESPACE} --timeout=120s
                 '''
             }
         }
 
         stage('Health Check') {
             steps {
-                sh '''
-                    sleep 5
-                    curl -f http://192.168.123.240:31048/health
-                '''
+                sh 'curl --retry 10 --retry-delay 2 --retry-connrefused -f "${APP_URL}"'
             }
+        }
+    }
+
+    post {
+        always {
+            sh 'docker logout || true'
+        }
+        failure {
+            echo 'Pipeline failed.'
         }
     }
 }
