@@ -61,7 +61,14 @@ pipeline {
 
         stage('Health Check') {
             steps {
-                sh 'curl --retry 10 --retry-delay 2 --retry-connrefused -f "${APP_URL}"'
+                sh '''
+                    sleep 5
+                    curl --fail \
+                        --retry 10 \
+                        --retry-delay 2 \
+                        --retry-connrefused \
+                        http://192.168.123.240:31048/health
+                '''
             }
         }
     }
