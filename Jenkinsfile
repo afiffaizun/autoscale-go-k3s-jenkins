@@ -31,19 +31,6 @@ pipeline {
             }
         }
 
-        stage('Deploy to K3s') {
-            steps {
-                sh '''
-                    kubectl apply -f k8s/service.yaml
-                    kubectl apply -f k8s/keda.yaml
-
-                    kubectl set image deployment/${DEPLOYMENT} \
-                    go-app=${IMAGE}:${BUILD_NUMBER} \
-                    -n ${NAMESPACE}
-                '''
-            }
-        }
-
         stage('Docker Push') {
             steps {
                 withCredentials([
@@ -62,6 +49,19 @@ pipeline {
                         docker logout
                     '''
                 }
+            }
+        }
+
+        stage('Deploy to K3s') {
+            steps {
+                sh '''
+                    kubectl apply -f k8s/service.yaml
+                    kubectl apply -f k8s/keda.yaml
+
+                    kubectl set image deployment/${DEPLOYMENT} \
+                      go-app=${IMAGE}:${BUILD_NUMBER} \
+                      -n ${NAMESPACE}
+                '''
             }
         }
 
