@@ -19,13 +19,40 @@ pipeline {
     }
 
     stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
         stage('Go Test') {
             steps {
                 sh 'go test ./...'
             }
         }
 
-        stage('Build & Push Image') {
+        stage('Build Image') {
+            steps {
+                sh '''
+                    IMAGE="${IMAGE_REPO}:${BUILD_NUMBER}"
+                    docker build -t "${IMAGE}" -t "${IMAGE_REPO}:latest" .
+                '''
+            }
+        }
+
+        stage('Trivy Image Scan') {
+            steps {
+                sh '''
+                    trivy image \
+                      --exit-code 1 \
+                      --severity HIGH,CRITICAL \
+                      --ignore-unfixed \
+                      ${IMAGE_REPO}:${BUILD_NUMBER}
+                '''
+            }
+        }
+
+        stage('Push Image') {
             steps {
                 withCredentials([
                     usernamePassword(
@@ -37,7 +64,6 @@ pipeline {
                     sh '''
                         IMAGE="${IMAGE_REPO}:${BUILD_NUMBER}"
                         echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
-                        docker build -t "${IMAGE}" -t "${IMAGE_REPO}:latest" .
                         docker push "${IMAGE}"
                         docker push "${IMAGE_REPO}:latest"
                         docker logout
