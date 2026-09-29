@@ -47,6 +47,7 @@ internet.
 | Orchestration | K3s (Kubernetes)                             |
 | Autoscaling | KEDA (`ScaledObject`, CPU-based)               |
 | Networking  | Tailscale Funnel, NodePort Service             |
+| Monitoring  | kube-prometheus-stack (Prometheus, Grafana, kube-state-metrics, node-exporter) |
 
 ## Project Structure
 
@@ -79,6 +80,7 @@ internet.
 - **Go 1.25+** (for local development and tests)
 - **Docker**
 - **kubectl** configured against the K3s cluster
+- **Helm 3+** (to install the monitoring stack)
 - **Trivy** (used by the Jenkins pipeline as an image scan gate)
 - **Jenkins** with agents/tools: `go`, `docker`, `kubectl`, `trivy`
 - **K3s** cluster with **KEDA** installed
@@ -165,6 +167,187 @@ kubectl get pods -n go-cicd -w
 kubectl get scaledobject go-app-scaledobject -n go-cicd
 ```
 
+## Monitoring (Prometheus & Grafana)
+
+Run Prometheus and Grafana on the same K3s cluster using
+`kube-prometheus-stack`. It bundles Prometheus, Grafana, Alertmanager,
+kube-state-metrics, and node-exporter.
+
+```
+ node-exporter   kube-state-metrics   cAdvisor (pod CPU)   KEDA operator
+       │                │                    │                   │
+       └────────────────┴───────────┬────────┴───────────────────┘
+                                    ▼
+                              Prometheus  ◄──── Grafana dashboards
+```
+
+### Install with Helm
+
+```bash
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo update
+
+helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
+  --namespace monitoring --create-namespace \
+  --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false \
+  --set prometheus.prometheusSpec.podMonitorSelectorNilUsesHelmValues=false
+```
+
+> The two `*SelectorNilUsesHelmValues=false` flags let Prometheus discover
+> `ServiceMonitor`/`PodMonitor` objects across the cluster (by default it only
+> selects those carrying the Helm release label). This is required to scrape
+> KEDA metrics from the `keda` namespace.
+
+Verify everything is running:
+
+```bash
+kubectl get pods -n monitoring
+kubectl get svc -n monitoring
+```
+
+Wait until all pods are `Running`/`Ready` (Prometheus, Grafana, Alertmanager,
+node-exporter, kube-state-metrics, operator).
+
+### Access Grafana
+
+Port-forward the Grafana service:
+
+```bash
+kubectl port-forward -n monitoring svc/monitoring-grafana 3000:80
+```
+
+Open <http://localhost:3000> and log in with the default credentials:
+
+| User  | Password     |
+| ----- | ------------ |
+| admin | prom-operator |
+
+If the password was changed, retrieve it from the secret:
+
+```bash
+kubectl get secret monitoring-grafana -n monitoring \
+  -o jsonpath='{.data.admin-password}' | base64 --decode; echo
+```
+
+Alternative access options:
+
+```bash
+# Option A: expose Grafana as a NodePort at install time
+helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
+  -n monitoring --create-namespace \
+  --set grafana.service.type=NodePort \
+  --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false \
+  --set prometheus.prometheusSpec.podMonitorSelectorNilUsesHelmValues=false
+
+# Option B: keep it local and expose via Tailscale (same approach as the app)
+```
+
+### Access Prometheus
+
+```bash
+kubectl port-forward -n monitoring svc/monitoring-kube-prometheus-prometheus 9090:9090
+```
+
+Open <http://localhost:9090> and check **Status → Targets** to confirm all
+targets (node-exporter, kube-state-metrics, cAdvisor, KEDA) are `UP`.
+
+### Scrape KEDA metrics (optional)
+
+KEDA exposes Prometheus metrics such as `keda_scaler_active` and
+`keda_scaler_metrics_value` on port `8080` (`/metrics`). How you enable scraping
+depends on how KEDA was installed:
+
+**Installed with Helm:**
+
+```bash
+helm repo add kedacore https://kedacore.github.io/charts
+helm repo update
+
+helm upgrade keda kedacore/keda -n keda --reuse-values \
+  --set prometheus.operator.enabled=true \
+  --set prometheus.operator.serviceMonitor.enabled=true
+```
+
+**Installed with the quickstart manifest:** apply a `ServiceMonitor` manually:
+
+```bash
+kubectl apply -f - <<'EOF'
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: keda-operator
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: keda-operator
+  namespaceSelector:
+    matchNames:
+      - keda
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+EOF
+```
+
+Verify KEDA metrics are being scraped:
+
+```bash
+kubectl get servicemonitor -n monitoring
+# in Prometheus UI, run:
+#   keda_scaler_active
+#   keda_scaler_metrics_value
+```
+
+### Autoscaling dashboards
+
+`kube-prometheus-stack` provisions curated dashboards in Grafana (search for
+**Kubernetes / Compute Resources** and **Kubernetes / Views** in
+**Dashboards → Browse**).
+
+To track the `go-app` scale-up, add panels (or use *Explore*) with these
+PromQL queries:
+
+| Panel | PromQL |
+| ----- | ------ |
+| Current replicas | `sum(kube_deployment_status_replicas{namespace="go-cicd",deployment="go-app"})` |
+| Desired replicas (HPA) | `sum(kube_horizontalpodautoscaler_status_desired_replicas{namespace="go-cicd"})` |
+| Pod CPU usage | `sum(rate(container_cpu_usage_seconds_total{namespace="go-cicd",pod=~"go-app-.*",container!="",container!="POD"}[2m]))` |
+| Pod CPU limit | `sum(kube_pod_container_resource_limits_cpu_cores{namespace="go-cicd",pod=~"go-app-.*"})` |
+| KEDA scaler active | `keda_scaler_active{scaledObject="go-app-scaledobject"}` |
+
+Live test:
+
+```bash
+# terminal 1: generate load
+curl http://<node-ip>:31048/cpu
+
+# terminal 2: watch it scale
+kubectl get pods -n go-cicd -w
+```
+
+Then watch the **Current replicas** and **Pod CPU usage** panels rise, and
+`keda_scaler_active` flip to `1`.
+
+### Uninstall monitoring
+
+```bash
+helm uninstall monitoring -n monitoring
+```
+
+> Helm does not delete the chart's CRDs. Remove them manually only if nothing
+> else in the cluster uses the Prometheus Operator:
+>
+> ```bash
+> kubectl delete crd alertmanagerconfigs.monitoring.coreos.com \
+>   alertmanagers.monitoring.coreos.com podmonitors.monitoring.coreos.com \
+>   probes.monitoring.coreos.com prometheusagents.monitoring.coreos.com \
+>   prometheuses.monitoring.coreos.com prometheusrules.monitoring.coreos.com \
+>   scrapeconfigs.monitoring.coreos.com servicemonitors.monitoring.coreos.com \
+>   thanosrulers.monitoring.coreos.com
+> ```
+
 ## CI/CD Pipeline (Jenkins)
 
 The declarative pipeline in `Jenkinsfile` runs these stages:
@@ -227,3 +410,6 @@ kubectl describe scaledobject go-app-scaledobject -n go-cicd
 | Deploy stage timeout | `kubectl describe pod -n go-cicd` — likely image pull or resource issues |
 | Health check fails | Verify Service NodePort and node IP; retry with `curl -v` |
 | Pods not scaling | Ensure KEDA is installed and `kubectl get scaledobject -n go-cicd` shows `Ready` |
+| Monitoring pods `Pending` | K3s node is low on CPU/memory — reduce replicas or free resources |
+| `keda_*` metrics missing | Recheck the `ServiceMonitor` and the `*SelectorNilUsesHelmValues=false` flags |
+| Cannot log in to Grafana | Reset password from the `monitoring-grafana` secret (see above) |
